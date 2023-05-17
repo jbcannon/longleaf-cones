@@ -1,0 +1,135 @@
+var sites = ee.FeatureCollection("users/jbcannon/LLP_Brockway_sites"),
+    nlcd = ee.ImageCollection("USGS/NLCD_RELEASES/2016_REL");
+
+/*-----------------------------------------------------------------------------
+LANDSAT-DERIVED NDVI TIME SERIES FOR BROCKWAY SITES 
+-------------------------------------------------------------------------------
+     Jeffery B. Cannon
+     14 August 2022
+     jeffery.cannon@jonesctr.org
+-------------------------------------------------------------------------------
+The goal of this script is to plot change in NDVI over time for Brockways'
+Longleaf pine sites. The script pulls winter imagery (Dec-Feb) from LANDSAT7
+and LANDSAT8 (2000-2020). The script masks clouds, and further masks non-
+forested areas (using 2016 NLCD). Next, the script reduces stacked pixels to
+median NDVI value and extracts a mean value over the AOIs. Exports SHP to
+MyDrive.
+-------------------------------------------------------------------------------
+INPUTS
+-----------------------------------------------------------------------------*/
+// Sepcify AOI
+//Buffer points to 50 ha
+var buff = function(feature) {return feature.buffer(398.9)}
+var AOI = sites.map(buff)
+
+// Specify settings for the years to filter on
+var start = '2000-11-01'; //first year
+var end = '2021-11-01'    // last year
+var mos = [11, 2]          // months to get imagery ([6,8] = June-Aug) 
+var interval = 1;
+var increment = 'year';
+
+//-----------------------------------------------------------------------------
+// PROCESSING
+// -------------------------------------------------------------------------------
+// Generate list of start dates for image aquisition (in millis)
+var startDate = ee.Date(start);
+var secondDate = startDate.advance(interval, increment).millis();
+var increase = secondDate.subtract(startDate.millis());
+var dates = ee.List.sequence(startDate.millis(), ee.Date(end).millis(), increase)
+print(dates, 'date list')
+
+// Download LANDSAT 8 imagery from specified months
+var L8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(AOI)
+  .filter(ee.Filter.calendarRange(mos[0], mos[1], 'month'))
+  .filter(ee.Filter.calendarRange(2013,2022, 'year'))
+  .select(['SR_B5', 'SR_B4', 'SR_B3', 'SR_B2', 'QA_PIXEL'])
+  .map(function(img) {return(img.rename(['IR', 'R', 'G', 'B', 'QA_PIXEL']))})
+
+// Download LANDSAT 7 imagery from specified months
+var L7 = ee.ImageCollection("LANDSAT/LE07/C02/T1_L2")
+  .filterBounds(AOI)
+  .filter(ee.Filter.calendarRange(mos[0], mos[1], 'month'))
+  .filter(ee.Filter.calendarRange(2000,2012, 'year'))
+  .select(['SR_B4', 'SR_B3', 'SR_B2', 'SR_B1', 'QA_PIXEL'])
+  .map(function(img) {return(img.rename(['IR', 'R', 'G', 'B', 'QA_PIXEL']))})
+  
+// Functions for Vegetation indexes
+var addNDVI = function(image) {
+  var ndvi = image.normalizedDifference(['IR', 'R']);
+  return image.addBands(ndvi.rename('NDVI'));
+};
+
+var addEVI = function(image) {
+  var evi = image.expression('2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+    'NIR' : image.select('IR'),
+    'RED' : image.select('R'),
+    'BLUE' : image.select('B')});
+  return image.addBands(evi.rename('EVI'));
+};
+
+// Merge image collections into one, rename bands
+var col = L8.merge(L7)
+  .map(addNDVI)
+  .map(addEVI)
+
+// Function to MASK CLOUDS from an image
+var mask_clouds = function(image) {
+  var imgyr = ee.Number.parse(image.date().format('YYYY'))
+  var CLOUD_VALUE = ee.Algorithms.If(imgyr.gt(2012), 22000, 5800)
+  var cld_tmp = image.select('QA_PIXEL').lt(ee.Number(CLOUD_VALUE));
+  image = image.mask(cld_tmp)
+  return(image)
+}
+
+// FUNCTION TO ANNUAL COMPOSITES IMAGERY (mean, mask clouds)
+var winterComposites = function(bnd) {
+  var site_col = col.filterBounds(bnd)
+    .map(function(image) {return(image.clip(bnd))})
+
+  // Composite images by time period (using mean) 
+  var composites = ee.ImageCollection.fromImages(dates.map(function(startYear){
+    var filtCol = site_col.filterDate(ee.Date(startYear), ee.Date(startYear).advance(interval, increment));
+    filtCol = filtCol.map(function(i) {return(mask_clouds(i))})
+    var img = filtCol.mean()
+    var imgyr = ee.Number.parse(filtCol.first().date().format('YYYY'))
+    return ee.Image(img.set('year', imgyr));
+  }));
+  return(composites)
+}
+
+col = col.filterBounds(AOI).map(function(i) {return(i.clip(AOI))})
+var comp = winterComposites(AOI)
+
+var getVIs = function(bnd) {
+  //Get single area image stack
+  var imgstk = comp.map(function(i) {return(i.clip(bnd))})
+  
+  // Get outputs from single area
+  var output = imgstk.map(function(img) {
+    img = img.select('NDVI', 'EVI')
+    var dict = img.reduceRegion( {
+      geometry: bnd.geometry(),
+      reducer: ee.Reducer.mean(),
+      scale: 30
+    })
+    img = img.set('NDVI', dict.get('NDVI'))
+       .set('EVI', dict.get('EVI'))
+       .set('site', bnd.get('partner'))
+       .select([])
+    return(img)})
+  return(output)
+}
+
+// Apply reduction and output
+var outputs = AOI.map(function(b) {return(getVIs(b))})
+
+outputs = outputs.flatten() //bc we get a collection of collections
+
+Export.table.toDrive({
+  collection: outputs,
+  description: 'brockway_winter_ndvi_2001-2022',
+  fileFormat: 'CSV',
+  selectors: ['site', 'year', 'NDVI', 'EVI']
+});
