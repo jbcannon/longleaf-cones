@@ -1,0 +1,118 @@
+/*-----------------------------------------------------------------------------
+EXTRACT DAILY PRECIPITATION (1981-PRESENT) USING PRISM AN81d
+EXTRACT MONTHLY DROUGHT (1981-PRESENT) USING GRIDMET
+-------------------------------------------------------------------------------
+     Jeffery B. Cannon
+     15 November 2022 - 15 August 2022
+     jeffery.cannon@jonesctr.org
+-------------------------------------------------------------------------------
+The goal of this script is to plot extract daily precipitation estimates (mm)
+from PRISM dataset and 5-day drought indexes from GRIDMET (PDSI and Z). In 
+this case, climate data is extracted from the 12 long-term longleaf pine cone
+monitoring sites. The script loops through AOIs, and extracts daily ppt for 
+the entire PRSIM dataset (1981-present) and 5-day drought indexes. 
+-------------------------------------------------------------------------------
+INPUTS
+-----------------------------------------------------------------------------*/
+// Load GRIDMET Drought data, select layers of interest, and filter by date
+var pdsi = gridmet.select(['pdsi','z'])
+    .filter(ee.Filter.calendarRange(1980,2022,'year'))
+
+// Load PRISM, select layers of interest, and filter by date
+prism = prism.select('ppt')
+// adjust these filters if needed... or omit for full 1981-present daily dataset
+      .filter(ee.Filter.calendarRange(1980,2022, 'year'))
+
+// Prep sites into individual points as needed
+sites = ee.FeatureCollection(
+    sites.aggregate_array('partner')
+          .distinct()
+          .map(
+            function(name) {
+            return(sites.filter(ee.Filter.equals('partner', name)).first())}));
+Map.addLayer(sites);
+Map.centerObject(sites);
+
+// Function to get annual ppt from prism Image collection based on unique field ('partner')
+var get_pdsi = function(name) {
+  var bnd = sites.filter(ee.Filter.equals('partner', name))
+  var site_summary = ee.FeatureCollection(pdsi.map(function(img) {
+    var drought = img.reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: bnd.geometry()
+        })
+    
+    // replace pdsi with -99 if null
+    var val = drought.get('pdsi')
+    var isNULL = ee.Algorithms.IsEqual(val, null)
+    val = ee.Algorithms.If(isNULL, ee.Number(-99), drought.get('pdsi'))
+    drought = drought.set('pdsi', val)
+    
+    // replace z with -99 if null
+    val = drought.get('z')
+    isNULL = ee.Algorithms.IsEqual(val, null)
+    val = ee.Algorithms.If(isNULL, ee.Number(-99), drought.get('z'))
+    drought = drought.set('z', val)
+    
+    // return a feature
+    drought = ee.Feature(bnd.geometry(), drought
+            .set('site', name)
+            .set('date', img.date().format('YYYY-MM-dd')))
+    return(drought)
+  }))
+  return(site_summary)
+}
+
+// Loop through all data
+var pdsi_output = ee.FeatureCollection(sites.aggregate_array('partner').map( function(name) {
+  var site_summary = get_pdsi(name)
+  return(ee.FeatureCollection(site_summary))
+})).flatten()
+
+pdsi_output = pdsi_output.map(function(f) {return(f.setGeometry(null))})
+
+// Function to get annual ppt from prism Image collection based on unique field ('partner')
+var get_annual_ppt = function(name) {
+  var bnd = sites.filter(ee.Filter.equals('partner', name))
+  var site_summary = ee.FeatureCollection(prism.map(function(img) {
+    var ppt = img.reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: bnd.geometry()
+        })
+    ppt = ee.Feature(bnd.geometry(),
+            ppt.set('ppt', ppt.get('ppt'))
+            .set('site', name)
+            .set('date', img.date().format('YYYY-MM-dd')))
+    return(ppt)
+  }))
+  return(site_summary)
+}
+
+// Loop through all data
+var ppt_output = ee.FeatureCollection(sites.aggregate_array('partner').map( function(name) {
+  var site_summary = get_annual_ppt(name)
+  return(ee.FeatureCollection(site_summary))
+})).flatten()
+
+ppt_output = ppt_output.map(function(f) {return(f.setGeometry(null))})
+
+// Probably don't print the data because it's likely > 5000 days * sites
+// BUt lets look at the first one.
+print(pdsi_output.first(), 'pdsi output sample')
+print(pdsi_output.size(), 'size of pdsi_output')
+print(ppt_output.first(), 'ppt output sample')
+print(ppt_output.size(), 'size of ppt_output')
+
+// EXPORT TO GOOGLE DRIVE
+Export.table.toDrive({
+  collection: pdsi_output,
+  description: 'brockway_site_gridmet_pdsi',
+  fileFormat: 'CSV'
+});
+
+// EXPORT TO GOOGLE DRIVE
+Export.table.toDrive({
+  collection: ppt_output,
+  description: 'brockway_site_prism_ppt',
+  fileFormat: 'CSV'
+});
