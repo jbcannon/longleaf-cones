@@ -1,5 +1,5 @@
 # longleaf-cones
-Code associated with Cannon et al. 2023 Longleaf pine cones analysis
+Code associated with Cannon et al. (in review) Longleaf pine cones analysis
 
 This code library contains items to calculate NDVI and daily precipitation from Brockway/Boyer Longleaf Pine cone sites
 
